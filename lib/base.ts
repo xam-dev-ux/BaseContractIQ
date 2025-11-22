@@ -2,12 +2,16 @@ import { createPublicClient, http, isAddress } from "viem";
 import { base } from "viem/chains";
 import { ContractData } from "./types";
 
-const RPC_URL = process.env.BASE_RPC_URL || "https://mainnet.base.org";
+const RPC_URL = process.env.BASE_RPC_URL || "https://base.llamarpc.com";
 
 export function getBaseClient() {
   return createPublicClient({
     chain: base,
-    transport: http(RPC_URL),
+    transport: http(RPC_URL, {
+      batch: true,
+      retryCount: 3,
+      retryDelay: 1000,
+    }),
   });
 }
 
