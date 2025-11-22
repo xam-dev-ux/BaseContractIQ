@@ -27,72 +27,78 @@ export async function getContractsDeployedBy(
 
   try {
     const currentBlock = await client.getBlockNumber();
-    const startBlock = currentBlock - BigInt(1000000);
+    const blocksToScan = BigInt(10000); // Scan last 10k blocks (~8 hours on Base)
+    const chunkSize = BigInt(1000); // Max allowed by RPC
+    const startBlock = currentBlock - blocksToScan;
 
-    const logs = await client.getLogs({
-      fromBlock: startBlock,
-      toBlock: currentBlock,
-      address: undefined,
-    });
-
-    const txHashes = new Set<string>();
-
-    const block = await client.getBlock({ blockNumber: currentBlock });
-    const transactions = block.transactions;
-
-    for (const txHash of transactions) {
-      if (typeof txHash === "string") {
-        txHashes.add(txHash);
-      }
-    }
-
-    for (let i = 0; i < Math.min(50, txHashes.size); i++) {
-      const txHashArray = Array.from(txHashes);
-      const txHash = txHashArray[i];
+    // Scan in chunks to avoid RPC limits
+    for (let i = startBlock; i < currentBlock; i += chunkSize) {
+      const fromBlock = i;
+      const toBlock = i + chunkSize > currentBlock ? currentBlock : i + chunkSize;
 
       try {
-        const tx = await client.getTransaction({ hash: txHash as `0x${string}` });
+        // Get all transactions in this range
+        const logs = await client.getLogs({
+          fromBlock,
+          toBlock,
+        });
 
-        if (
-          tx.from.toLowerCase() === address.toLowerCase() &&
-          !tx.to
-        ) {
-          const receipt = await client.getTransactionReceipt({
-            hash: txHash as `0x${string}`,
-          });
+        // Extract unique tx hashes
+        const txHashes = new Set(logs.map(log => log.transactionHash));
 
-          if (receipt.contractAddress) {
-            const bytecode = await client.getBytecode({
-              address: receipt.contractAddress,
-            });
+        // Check each transaction
+        for (const txHash of txHashes) {
+          if (contracts.length >= 20) break; // Limit to 20 contracts max
 
-            const block = await client.getBlock({
-              blockNumber: receipt.blockNumber,
-            });
+          try {
+            const tx = await client.getTransaction({ hash: txHash });
 
-            const interactionCount = await getInteractionCount(
-              client,
-              receipt.contractAddress
-            );
-            const eventCount = receipt.logs.length;
+            // Check if deployer matches and it's a contract creation
+            if (
+              tx.from.toLowerCase() === address.toLowerCase() &&
+              !tx.to
+            ) {
+              const receipt = await client.getTransactionReceipt({ hash: txHash });
 
-            contracts.push({
-              address: receipt.contractAddress,
-              deploymentDate: new Date(Number(block.timestamp) * 1000),
-              txHash: txHash as string,
-              bytecodeSize: bytecode ? bytecode.length : 0,
-              isProxy: bytecode ? isProxyBytecode(bytecode) : false,
-              isVerified: await isContractVerified(receipt.contractAddress),
-              interactionCount,
-              eventCount,
-              bytecode: bytecode || "0x",
-              deploymentTimestamp: Number(block.timestamp),
-            });
+              if (receipt.contractAddress) {
+                const bytecode = await client.getBytecode({
+                  address: receipt.contractAddress,
+                });
+
+                const block = await client.getBlock({
+                  blockNumber: receipt.blockNumber,
+                });
+
+                const interactionCount = await getInteractionCount(
+                  client,
+                  receipt.contractAddress
+                );
+                const eventCount = receipt.logs.length;
+
+                contracts.push({
+                  address: receipt.contractAddress,
+                  deploymentDate: new Date(Number(block.timestamp) * 1000),
+                  txHash: txHash,
+                  bytecodeSize: bytecode ? bytecode.length : 0,
+                  isProxy: bytecode ? isProxyBytecode(bytecode) : false,
+                  isVerified: await isContractVerified(receipt.contractAddress),
+                  interactionCount,
+                  eventCount,
+                  bytecode: bytecode || "0x",
+                  deploymentTimestamp: Number(block.timestamp),
+                });
+              }
+            }
+          } catch (error) {
+            continue;
           }
         }
       } catch (error) {
+        console.error(`Error scanning blocks ${fromBlock}-${toBlock}:`, error);
         continue;
       }
+
+      if (contracts.length >= 20) break;
     }
   } catch (error) {
     console.error("Error fetching contracts:", error);
@@ -107,12 +113,29 @@ async function getInteractionCount(
 ): Promise<number> {
   try {
     const currentBlock = await client.getBlockNumber();
-    const logs = await client.getLogs({
-      address: contractAddress as `0x${string}`,
-      fromBlock: currentBlock - BigInt(10000),
-      toBlock: currentBlock,
-    });
-    return logs.length;
+    const chunkSize = BigInt(1000);
+    const blocksToScan = BigInt(5000); // Last 5k blocks
+    const startBlock = currentBlock - blocksToScan;
+    let totalLogs = 0;
+
+    // Scan in chunks
+    for (let i = startBlock; i < currentBlock; i += chunkSize) {
+      const fromBlock = i;
+      const toBlock = i + chunkSize > currentBlock ? currentBlock : i + chunkSize;
+
+      try {
+        const logs = await client.getLogs({
+          address: contractAddress as `0x${string}`,
+          fromBlock,
+          toBlock,
+        });
+        totalLogs += logs.length;
+      } catch (error) {
+        continue;
+      }
+    }
+
+    return totalLogs;
   } catch (error) {
     return 0;
   }
