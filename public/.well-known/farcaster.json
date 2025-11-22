@@ -1,0 +1,23 @@
+{
+ "accountAssociation": {
+    "header": "eyJmaWQiOjU4MDczOCwidHlwZSI6ImN1c3RvZHkiLCJrZXkiOiIweDEwOUM5ZTgwMTNFY2U4ODZENGY4QUUyNjkyNTRkZTkzMEFFZmNkNDQifQ",
+    "payload": "eyJkb21haW4iOiJiYXNlY29udHJhY3RpcS52ZXJjZWwuYXBwIn0",
+    "signature": "MTDVCQeti00AjFj5aVxc+g6Q319IAKmTy5dhjH4TQgtUm25msy3pYwPZr+ZqCOSoVpS1yD19gCI6C/DFxsMldhs="
+  },
+  "miniapp": {
+    "version": "1",
+    "name": "Base Contract IQ",
+    "description": "Analyze contract quality and detect airdrop farming on Base network",
+    "iconUrl": "https://basecontractiq.vercel.app/icon.svg",
+    "homeUrl": "https://basecontractiq.vercel.app",
+    "canonicalDomain": "basecontractiq.vercel.app",
+    "requiredChains": ["eip155:8453"],
+    "tags": ["base", "contracts", "analytics", "miniapp"],
+    "requiredCapabilities": [
+      "actions.ready"
+    ]
+  },
+  "baseBuilder": {
+    "ownerAddress": "0xB3e4Eb6dC22540128Ce2D5C13C213D9d9EAaFa38"
+  }
+}

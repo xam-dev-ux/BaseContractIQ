@@ -1,0 +1,21 @@
+{
+  "name": "Base Contract IQ",
+  "short_name": "ContractIQ",
+  "description": "Analyze contract quality and detect airdrop farming on Base network",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0052FF",
+  "theme_color": "#0052FF",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
