@@ -30,17 +30,18 @@ export async function getContractsDeployedBy(
     const blocksToScan = BigInt(5000); // Scan last 5k blocks (~4 hours on Base)
     const startBlock = currentBlock - blocksToScan;
 
-    // Use Etherscan API for better performance
+    // Use Etherscan API (fast path)
     const etherscanContracts = await getContractsFromEtherscan(address, currentBlock);
 
     if (etherscanContracts.length > 0) {
       return etherscanContracts;
     }
 
-    // Fallback: Scan blocks with adaptive chunk size
-    let chunkSize = BigInt(100); // Start small
+    // Fallback: Quick scan only recent blocks
+    const quickScanBlocks = BigInt(1000); // Only 1k blocks for fallback
+    let chunkSize = BigInt(100);
 
-    for (let i = startBlock; i < currentBlock; i += chunkSize) {
+    for (let i = currentBlock - quickScanBlocks; i < currentBlock; i += chunkSize) {
       const fromBlock = i;
       const toBlock = i + chunkSize > currentBlock ? currentBlock : i + chunkSize;
 
@@ -61,7 +62,7 @@ export async function getContractsDeployedBy(
 
         // Check each transaction
         for (const txHash of txHashes) {
-          if (contracts.length >= 20) break;
+          if (contracts.length >= 5) break; // Limit to 5 for fallback
 
           try {
             const tx = await client.getTransaction({ hash: txHash });
@@ -74,19 +75,10 @@ export async function getContractsDeployedBy(
               const receipt = await client.getTransactionReceipt({ hash: txHash });
 
               if (receipt.contractAddress) {
-                const bytecode = await client.getBytecode({
-                  address: receipt.contractAddress,
-                });
-
-                const block = await client.getBlock({
-                  blockNumber: receipt.blockNumber,
-                });
-
-                const interactionCount = await getInteractionCount(
-                  client,
-                  receipt.contractAddress
-                );
-                const eventCount = receipt.logs.length;
+                const [bytecode, block] = await Promise.all([
+                  client.getBytecode({ address: receipt.contractAddress }),
+                  client.getBlock({ blockNumber: receipt.blockNumber }),
+                ]);
 
                 contracts.push({
                   address: receipt.contractAddress,
@@ -94,9 +86,9 @@ export async function getContractsDeployedBy(
                   txHash: txHash,
                   bytecodeSize: bytecode ? bytecode.length : 0,
                   isProxy: bytecode ? isProxyBytecode(bytecode) : false,
-                  isVerified: await isContractVerified(receipt.contractAddress),
-                  interactionCount,
-                  eventCount,
+                  isVerified: false, // Skip verification in fallback
+                  interactionCount: 0, // Skip interaction count in fallback
+                  eventCount: receipt.logs.length,
                   bytecode: bytecode || "0x",
                   deploymentTimestamp: Number(block.timestamp),
                 });
@@ -117,7 +109,7 @@ export async function getContractsDeployedBy(
         continue;
       }
 
-      if (contracts.length >= 20) break;
+      if (contracts.length >= 5) break;
     }
   } catch (error) {
     console.error("Error fetching contracts:", error);
@@ -126,38 +118,32 @@ export async function getContractsDeployedBy(
   return contracts;
 }
 
-async function getInteractionCount(
+async function getQuickInteractionCount(
   client: ReturnType<typeof getBaseClient>,
   contractAddress: string
 ): Promise<number> {
   try {
     const currentBlock = await client.getBlockNumber();
-    const chunkSize = BigInt(1000);
-    const blocksToScan = BigInt(5000); // Last 5k blocks
-    const startBlock = currentBlock - blocksToScan;
-    let totalLogs = 0;
+    const fromBlock = currentBlock - BigInt(1000); // Last 1k blocks only
 
-    // Scan in chunks
-    for (let i = startBlock; i < currentBlock; i += chunkSize) {
-      const fromBlock = i;
-      const toBlock = i + chunkSize > currentBlock ? currentBlock : i + chunkSize;
+    const logs = await client.getLogs({
+      address: contractAddress as `0x${string}`,
+      fromBlock,
+      toBlock: currentBlock,
+    });
 
-      try {
-        const logs = await client.getLogs({
-          address: contractAddress as `0x${string}`,
-          fromBlock,
-          toBlock,
-        });
-        totalLogs += logs.length;
-      } catch (error) {
-        continue;
-      }
-    }
-
-    return totalLogs;
+    return logs.length;
   } catch (error) {
     return 0;
   }
+}
+
+async function getInteractionCount(
+  client: ReturnType<typeof getBaseClient>,
+  contractAddress: string
+): Promise<number> {
+  // Use quick count for performance
+  return getQuickInteractionCount(client, contractAddress);
 }
 
 async function getContractsFromEtherscan(
@@ -173,7 +159,8 @@ async function getContractsFromEtherscan(
   try {
     // Get contract creations from Etherscan API
     const response = await fetch(
-      `https://api.etherscan.io/v2/api?chainid=8453&module=account&action=txlist&address=${address}&startblock=0&endblock=${currentBlock}&page=1&offset=100&sort=desc&apikey=${apiKey}`
+      `https://api.etherscan.io/v2/api?chainid=8453&module=account&action=txlist&address=${address}&startblock=0&endblock=${currentBlock}&page=1&offset=50&sort=desc&apikey=${apiKey}`,
+      { signal: AbortSignal.timeout(10000) } // 10s timeout
     );
 
     const data = await response.json();
@@ -185,42 +172,45 @@ async function getContractsFromEtherscan(
     const client = getBaseClient();
     const contracts: ContractData[] = [];
 
-    for (const tx of data.result) {
-      if (contracts.length >= 20) break;
+    // Process in parallel batches for speed
+    const contractCreations = data.result.filter((tx: any) => !tx.to || tx.to === "");
 
-      // Check if it's a contract creation (to address is empty)
-      if (!tx.to || tx.to === "") {
-        try {
-          const receipt = await client.getTransactionReceipt({
-            hash: tx.hash as `0x${string}`,
+    for (const tx of contractCreations.slice(0, 10)) { // Max 10 contracts
+      try {
+        const receipt = await client.getTransactionReceipt({
+          hash: tx.hash as `0x${string}`,
+        });
+
+        if (receipt.contractAddress) {
+          // Parallel fetch for speed
+          const [bytecode, isVerified] = await Promise.all([
+            client.getBytecode({ address: receipt.contractAddress }),
+            isContractVerified(receipt.contractAddress),
+          ]);
+
+          // Quick interaction count (no chunking, just estimate)
+          const interactionCount = await getQuickInteractionCount(
+            client,
+            receipt.contractAddress
+          );
+
+          contracts.push({
+            address: receipt.contractAddress,
+            deploymentDate: new Date(Number(tx.timeStamp) * 1000),
+            txHash: tx.hash,
+            bytecodeSize: bytecode ? bytecode.length : 0,
+            isProxy: bytecode ? isProxyBytecode(bytecode) : false,
+            isVerified,
+            interactionCount,
+            eventCount: receipt.logs.length,
+            bytecode: bytecode || "0x",
+            deploymentTimestamp: Number(tx.timeStamp),
           });
 
-          if (receipt.contractAddress) {
-            const bytecode = await client.getBytecode({
-              address: receipt.contractAddress,
-            });
-
-            const interactionCount = await getInteractionCount(
-              client,
-              receipt.contractAddress
-            );
-
-            contracts.push({
-              address: receipt.contractAddress,
-              deploymentDate: new Date(Number(tx.timeStamp) * 1000),
-              txHash: tx.hash,
-              bytecodeSize: bytecode ? bytecode.length : 0,
-              isProxy: bytecode ? isProxyBytecode(bytecode) : false,
-              isVerified: await isContractVerified(receipt.contractAddress),
-              interactionCount,
-              eventCount: Number(tx.gasUsed || 0),
-              bytecode: bytecode || "0x",
-              deploymentTimestamp: Number(tx.timeStamp),
-            });
-          }
-        } catch (error) {
-          continue;
+          if (contracts.length >= 10) break;
         }
+      } catch (error) {
+        continue;
       }
     }
 
