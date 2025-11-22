@@ -44,7 +44,7 @@ export async function getContractsDeployedBy(
         });
 
         // Extract unique tx hashes
-        const txHashes = new Set(logs.map(log => log.transactionHash));
+        const txHashes = Array.from(new Set(logs.map(log => log.transactionHash)));
 
         // Check each transaction
         for (const txHash of txHashes) {
