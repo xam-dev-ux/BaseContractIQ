@@ -27,11 +27,19 @@ export async function getContractsDeployedBy(
 
   try {
     const currentBlock = await client.getBlockNumber();
-    const blocksToScan = BigInt(10000); // Scan last 10k blocks (~8 hours on Base)
-    const chunkSize = BigInt(1000); // Max allowed by RPC
+    const blocksToScan = BigInt(5000); // Scan last 5k blocks (~4 hours on Base)
     const startBlock = currentBlock - blocksToScan;
 
-    // Scan in chunks to avoid RPC limits
+    // Use Etherscan API for better performance
+    const etherscanContracts = await getContractsFromEtherscan(address, currentBlock);
+
+    if (etherscanContracts.length > 0) {
+      return etherscanContracts;
+    }
+
+    // Fallback: Scan blocks with adaptive chunk size
+    let chunkSize = BigInt(100); // Start small
+
     for (let i = startBlock; i < currentBlock; i += chunkSize) {
       const fromBlock = i;
       const toBlock = i + chunkSize > currentBlock ? currentBlock : i + chunkSize;
@@ -43,12 +51,17 @@ export async function getContractsDeployedBy(
           toBlock,
         });
 
+        // If successful with large chunk, increase size
+        if (logs.length < 10000 && chunkSize < BigInt(500)) {
+          chunkSize = BigInt(500);
+        }
+
         // Extract unique tx hashes
         const txHashes = Array.from(new Set(logs.map(log => log.transactionHash)));
 
         // Check each transaction
         for (const txHash of txHashes) {
-          if (contracts.length >= 20) break; // Limit to 20 contracts max
+          if (contracts.length >= 20) break;
 
           try {
             const tx = await client.getTransaction({ hash: txHash });
@@ -93,7 +106,13 @@ export async function getContractsDeployedBy(
             continue;
           }
         }
-      } catch (error) {
+      } catch (error: any) {
+        // If chunk too large, reduce size and retry
+        if (error.message?.includes('max results')) {
+          chunkSize = BigInt(Math.max(10, Number(chunkSize) / 10));
+          i -= chunkSize; // Retry this range
+          continue;
+        }
         console.error(`Error scanning blocks ${fromBlock}-${toBlock}:`, error);
         continue;
       }
@@ -138,6 +157,77 @@ async function getInteractionCount(
     return totalLogs;
   } catch (error) {
     return 0;
+  }
+}
+
+async function getContractsFromEtherscan(
+  address: string,
+  currentBlock: bigint
+): Promise<ContractData[]> {
+  const apiKey = process.env.ETHERSCAN_API_KEY;
+
+  if (!apiKey) {
+    return [];
+  }
+
+  try {
+    // Get contract creations from Etherscan API
+    const response = await fetch(
+      `https://api.etherscan.io/v2/api?chainid=8453&module=account&action=txlist&address=${address}&startblock=0&endblock=${currentBlock}&page=1&offset=100&sort=desc&apikey=${apiKey}`
+    );
+
+    const data = await response.json();
+
+    if (data.status !== "1" || !data.result) {
+      return [];
+    }
+
+    const client = getBaseClient();
+    const contracts: ContractData[] = [];
+
+    for (const tx of data.result) {
+      if (contracts.length >= 20) break;
+
+      // Check if it's a contract creation (to address is empty)
+      if (!tx.to || tx.to === "") {
+        try {
+          const receipt = await client.getTransactionReceipt({
+            hash: tx.hash as `0x${string}`,
+          });
+
+          if (receipt.contractAddress) {
+            const bytecode = await client.getBytecode({
+              address: receipt.contractAddress,
+            });
+
+            const interactionCount = await getInteractionCount(
+              client,
+              receipt.contractAddress
+            );
+
+            contracts.push({
+              address: receipt.contractAddress,
+              deploymentDate: new Date(Number(tx.timeStamp) * 1000),
+              txHash: tx.hash,
+              bytecodeSize: bytecode ? bytecode.length : 0,
+              isProxy: bytecode ? isProxyBytecode(bytecode) : false,
+              isVerified: await isContractVerified(receipt.contractAddress),
+              interactionCount,
+              eventCount: Number(tx.gasUsed || 0),
+              bytecode: bytecode || "0x",
+              deploymentTimestamp: Number(tx.timeStamp),
+            });
+          }
+        } catch (error) {
+          continue;
+        }
+      }
+    }
+
+    return contracts;
+  } catch (error) {
+    console.error("Etherscan API error:", error);
+    return [];
   }
 }
 
